@@ -111,16 +111,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		return m, nil
 	case fetchMetricsMsg:
-		mm, err := m.fluentbit.Metrics(m.ctx)
-		if err != nil {
-			m.err = err
-			return m, fetchMetricsCmd()
-		}
+		return func() (tea.Model, tea.Cmd) {
+			ctx, cancel := context.WithTimeout(m.ctx, time.Second+(time.Millisecond*200))
+			defer cancel()
 
-		m.indexes = len(mm.Input) + len(mm.Output)
-		m.history = append(m.history, mm)
-		m.err = nil
-		return m, fetchMetricsCmd()
+			mm, err := m.fluentbit.Metrics(ctx)
+			if err != nil {
+				m.err = err
+				return m, fetchMetricsCmd()
+			}
+
+			m.indexes = len(mm.Input) + len(mm.Output)
+			m.history = append(m.history, mm)
+			m.err = nil
+			return m, fetchMetricsCmd()
+		}()
 	}
 
 	var cmd tea.Cmd
