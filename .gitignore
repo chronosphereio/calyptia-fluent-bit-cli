@@ -89,5 +89,6 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
-# Main binary
+### Application spepecifics ###
 /fluent-bit-cli
+/fluentbit-data
