@@ -112,7 +112,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case fetchMetricsMsg:
 		return func() (tea.Model, tea.Cmd) {
-			ctx, cancel := context.WithTimeout(m.ctx, time.Second+(time.Millisecond*200))
+			ctx, cancel := context.WithTimeout(m.ctx, time.Second+1)
 			defer cancel()
 
 			mm, err := m.fluentbit.Metrics(ctx)
