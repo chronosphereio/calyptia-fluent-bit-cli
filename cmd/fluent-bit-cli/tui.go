@@ -128,9 +128,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}()
 	}
 
-	var cmd tea.Cmd
-	m.textInput, cmd = m.textInput.Update(msg)
-	return m, cmd
+	if m.fluentbit == nil {
+		var cmd tea.Cmd
+		m.textInput, cmd = m.textInput.Update(msg)
+		return m, cmd
+	}
+
+	return m, nil
 }
 
 func (m model) View() string {
