@@ -1,0 +1,25 @@
+name: fluent-bit-cli
+base: core20
+summary: Fluent bit Client UI Tool.
+description: |
+     Terminal based client to interact with a fluent-bit daemon.
+adopt-info: fluent-bit-cli
+confinement: strict
+version: "$VERSION"
+grade: "$GRADE"
+
+apps:
+  fluent-bit-cli:
+    command: fluent-bit-cli
+    plugs: [home]
+
+parts:
+  repeat:
+    plugin: go
+    source: ./
+    go-importpath: github.com/calyptia/fluent-bit-cli
+    go-channel: latest/stable
+    parse-info: []
+    build-packages:
+      - git
+      - build-essential
