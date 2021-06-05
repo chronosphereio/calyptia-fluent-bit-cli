@@ -14,7 +14,7 @@ apps:
     plugs: [home]
 
 parts:
-  repeat:
+  fluent-bit-cli:
     plugin: go
     source: ./
     go-importpath: github.com/calyptia/fluent-bit-cli
