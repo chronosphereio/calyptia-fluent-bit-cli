@@ -1,5 +1,5 @@
 name: fluent-bit-cli
-base: core20
+base: core18
 summary: Fluent bit Client UI Tool.
 description: |
      Terminal based client to interact with a fluent-bit daemon.
