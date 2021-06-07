@@ -30,8 +30,8 @@ jobs:
         run: echo ::set-output name=VERSION::${GITHUB_REF/refs\/tags\//}
       - name: Replace snapcraft version/grade
         run: |
-	  sed -i -e "s/\$VERSION/${{ steps.get_version.outputs.VERSION }}/g" snap/snapcraft.yaml
-	  sed -i -e "s/\$GRADE/stable/g" snap/snapcraft.yaml
+          sed -i -e "s/\$VERSION/${{ steps.get_version.outputs.VERSION }}/g" snap/snapcraft.yaml
+          sed -i -e "s/\$GRADE/stable/g" snap/snapcraft.yaml
       - uses: snapcore/action-build@v1
         id: build
       - uses: snapcore/action-publish@v1
