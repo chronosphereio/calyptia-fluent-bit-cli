@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,26 +22,41 @@ import (
 )
 
 type model struct {
-	ctx           context.Context
-	textInput     textinput.Model
-	fluentbit     *fluentbit.Client
-	indexes       int
-	selectedIndex int
-	history       []fluentbit.Metrics
-	infoLoaded    bool
-	info          fluentbit.BuildInfo
-	err           error
+	ctx               context.Context
+	baseURLSet        bool
+	baseURLInput      textinput.Model
+	baseURL           string
+	pullIntervalSet   bool
+	pullIntervalInput textinput.Model
+	pullInterval      time.Duration
+	fluentbit         *fluentbit.Client
+	indexes           int
+	selectedIndex     int
+	series            *fluentbit.Series
+	infoLoaded        bool
+	info              fluentbit.BuildInfo
+	err               error
 }
 
 func initialModel(ctx context.Context) model {
-	ti := textinput.NewModel()
-	ti.Placeholder = "Fluent Bit Base URL"
-	ti.Width = 40
-	ti.SetValue("http://localhost:2020")
-	ti.Focus()
+	baseURLInput := textinput.NewModel()
+	baseURLInput.Placeholder = "Fluent Bit Base URL"
+	baseURLInput.Width = 40
+	baseURLInput.SetValue("http://localhost:2020")
+	baseURLInput.Focus()
+
+	pullIntervalInput := textinput.NewModel()
+	pullIntervalInput.Placeholder = "Pull interval (seconds)"
+	pullIntervalInput.Width = 19
+	pullIntervalInput.SetValue("5")
 	return model{
-		ctx:       ctx,
-		textInput: ti,
+		ctx:               ctx,
+		baseURLInput:      baseURLInput,
+		pullIntervalInput: pullIntervalInput,
+		series: &fluentbit.Series{
+			Input:  map[string]fluentbit.InputSeries{},
+			Output: map[string]fluentbit.OutputSeries{},
+		},
 	}
 }
 
@@ -57,8 +74,8 @@ func fetchBuildInfoCmd() tea.Cmd {
 
 type fetchMetricsMsg struct{}
 
-func fetchMetricsCmd() tea.Cmd {
-	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+func fetchMetricsCmd(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg {
 		return fetchMetricsMsg{}
 	})
 }
@@ -71,17 +88,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case tea.KeyEnter:
 			if m.fluentbit == nil {
-				baseURL := m.textInput.Value()
-				if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
-					m.err = errors.New("invalid URL")
-					return m, textinput.Blink
-				}
+				if !m.baseURLSet {
+					baseURL := m.baseURLInput.Value()
+					if u, err := url.Parse(baseURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+						m.err = errors.New("invalid URL")
+						return m, textinput.Blink
+					}
 
-				m.fluentbit = &fluentbit.Client{
-					HTTPClient: http.DefaultClient,
-					BaseURL:    strings.TrimSuffix(baseURL, "/"),
+					m.baseURL = baseURL
+					m.baseURLSet = true
+					m.pullIntervalInput.Focus()
+				} else {
+					pullIntervalStr := m.pullIntervalInput.Value()
+					pullIntervalInt, err := strconv.ParseInt(pullIntervalStr, 10, 64)
+					if err != nil || pullIntervalInt < 1 {
+						m.err = errors.New("invalid pull interval")
+						return m, textinput.Blink
+					}
+
+					m.fluentbit = &fluentbit.Client{
+						HTTPClient: http.DefaultClient,
+						BaseURL:    strings.TrimSuffix(m.baseURL, "/"),
+					}
+
+					m.pullInterval = time.Second * time.Duration(pullIntervalInt)
+					m.pullIntervalSet = true
+
+					return m, tea.Batch(fetchBuildInfoCmd(), fetchMetricsCmd(m.pullInterval))
 				}
-				return m, tea.Batch(fetchBuildInfoCmd(), fetchMetricsCmd())
 			}
 		case tea.KeyShiftTab, tea.KeyLeft, tea.KeyUp:
 			m.selectedIndex--
@@ -115,23 +149,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ctx, cancel := context.WithTimeout(m.ctx, time.Second+1)
 			defer cancel()
 
-			mm, err := m.fluentbit.Metrics(ctx)
+			err := m.series.Push(func() (fluentbit.Metrics, error) {
+				mm, err := m.fluentbit.Metrics(ctx)
+				if err != nil {
+					return mm, err
+				}
+				m.indexes = len(mm.Input) + len(mm.Output)
+				return mm, nil
+			})
 			if err != nil {
 				m.err = err
-				return m, fetchMetricsCmd()
+				return m, fetchMetricsCmd(m.pullInterval)
 			}
 
-			m.indexes = len(mm.Input) + len(mm.Output)
-			m.history = append(m.history, mm)
 			m.err = nil
-			return m, fetchMetricsCmd()
+			return m, fetchMetricsCmd(m.pullInterval)
 		}()
 	}
 
 	if m.fluentbit == nil {
-		var cmd tea.Cmd
-		m.textInput, cmd = m.textInput.Update(msg)
-		return m, cmd
+		var cmd1, cmd2 tea.Cmd
+		m.baseURLInput, cmd1 = m.baseURLInput.Update(msg)
+		m.pullIntervalInput, cmd2 = m.pullIntervalInput.Update(msg)
+		return m, tea.Batch(cmd1, cmd2)
 	}
 
 	return m, nil
@@ -141,15 +181,21 @@ func (m model) View() string {
 	var doc strings.Builder
 
 	if m.fluentbit == nil {
-		doc.WriteString(
-			"Fluent Bit Base URL\n" +
-				m.textInput.View() + "\n",
-		)
+		if !m.baseURLSet {
+			doc.WriteString(
+				"Fluent Bit Base URL\n" + m.baseURLInput.View() + "\n",
+			)
+		} else {
+			doc.WriteString(
+				"Pull interval (seconds)\n" +
+					m.pullIntervalInput.View() + "\n",
+			)
+		}
 	}
 
 	var selectedType, selectedMetric string
-	inputNames := currentInputNames(m.history)
-	outputNames := currentOutputNames(m.history)
+	inputNames := m.series.InputNames()
+	outputNames := m.series.OutputNames()
 	lenInputs := len(inputNames)
 	lenOutputs := len(outputNames)
 	if lenInputs != 0 && m.selectedIndex >= 0 && m.selectedIndex < lenInputs {
@@ -172,121 +218,127 @@ func (m model) View() string {
 		doc.WriteString(msg + "\n")
 	}
 
-	if len(m.history) >= 2 {
-		switch selectedType {
-		case "input":
-			input := normalizeInput(m.history, selectedMetric)
-			doc.WriteString(
+	switch selectedType {
+	case "input":
+		rates := m.series.Input[selectedMetric].InstantRates()
+		doc.WriteString(
+			lipgloss.JoinHorizontal(lipgloss.Bottom,
+				renderPlot(renderPlotProps{
+					Caption: "input " + selectedMetric + " records rate",
+					Series:  uint64ToFloat64Slice(rates.Records),
+					Width:   screenWidth / 2,
+					Height:  12,
+				}),
+				renderPlot(renderPlotProps{
+					Caption: "input " + selectedMetric + " bytes rate",
+					Series:  uint64ToFloat64Slice(rates.Bytes),
+					Width:   screenWidth / 2,
+					Height:  12,
+				}),
+			) + "\n",
+		)
+	case "output":
+		rates := m.series.Output[selectedMetric].InstantRates()
+		doc.WriteString(
+			lipgloss.JoinVertical(lipgloss.Left,
 				lipgloss.JoinHorizontal(lipgloss.Bottom,
 					renderPlot(renderPlotProps{
-						Caption: "input " + selectedMetric + " records",
-						Series:  input.RecordDeltas,
+						Caption: "output " + selectedMetric + " proc_records rate",
+						Series:  uint64ToFloat64Slice(rates.ProcRecords),
 						Width:   screenWidth / 2,
 						Height:  12,
 					}),
 					renderPlot(renderPlotProps{
-						Caption: "input " + selectedMetric + " bytes",
-						Series:  input.ByteDeltas,
+						Caption: "output " + selectedMetric + " proc_bytes rate",
+						Series:  uint64ToFloat64Slice(rates.ProcBytes),
 						Width:   screenWidth / 2,
 						Height:  12,
 					}),
-				) + "\n",
-			)
-		case "output":
-			output := normalizeOutput(m.history, selectedMetric)
-			doc.WriteString(
-				lipgloss.JoinVertical(lipgloss.Left,
-					lipgloss.JoinHorizontal(lipgloss.Bottom,
-						renderPlot(renderPlotProps{
-							Caption: "output " + selectedMetric + " proc_records",
-							Series:  output.ProcRecordDeltas,
-							Width:   screenWidth / 2,
-							Height:  12,
-						}),
-						renderPlot(renderPlotProps{
-							Caption: "output " + selectedMetric + " proc_bytes",
-							Series:  output.ProcByteDeltas,
-							Width:   screenWidth / 2,
-							Height:  12,
-						}),
-					),
-					lipgloss.JoinHorizontal(lipgloss.Bottom,
-						renderPlot(renderPlotProps{
-							Caption: "output " + selectedMetric + " errors",
-							Series:  output.ErrorDeltas,
-							Width:   screenWidth / 3,
-							Height:  7,
-						}),
-						renderPlot(renderPlotProps{
-							Caption: "output " + selectedMetric + " retries",
-							Series:  output.RetryDeltas,
-							Width:   screenWidth / 3,
-							Height:  7,
-						}),
-						renderPlot(renderPlotProps{
-							Caption: "output " + selectedMetric + " retries_failed",
-							Series:  output.RetryFailedDelta,
-							Width:   screenWidth / 3,
-							Height:  7,
-						}),
-					),
-				) + "\n",
-			)
-		}
+				),
+				lipgloss.JoinHorizontal(lipgloss.Bottom,
+					renderPlot(renderPlotProps{
+						Caption: "output " + selectedMetric + " errors rate",
+						Series:  uint64ToFloat64Slice(rates.Errors),
+						Width:   screenWidth / 3,
+						Height:  7,
+					}),
+					renderPlot(renderPlotProps{
+						Caption: "output " + selectedMetric + " retries rate",
+						Series:  uint64ToFloat64Slice(rates.Retries),
+						Width:   screenWidth / 3,
+						Height:  7,
+					}),
+					renderPlot(renderPlotProps{
+						Caption: "output " + selectedMetric + " retries_failed rate",
+						Series:  uint64ToFloat64Slice(rates.RetriesFailed),
+						Width:   screenWidth / 3,
+						Height:  7,
+					}),
+				),
+			) + "\n",
+		)
+	}
 
-		if lenInputs != 0 {
-			rows := [][]string{{
-				"name",
-				"records",
-				"bytes",
-			}}
-			for _, name := range inputNames {
-				style := lipgloss.NewStyle()
-				if selectedType == "input" && selectedMetric == name {
-					style = style.Bold(true).Inline(true).Foreground(lipgloss.Color("11"))
-				}
-
-				delta := currentInputDelta(m.history, name)
-				rows = append(rows, []string{
-					style.Render(name),
-					style.Render(fmt.Sprintf("%.2f", delta.RecordDeltas)),
-					style.Render(fmt.Sprintf("%.2f", delta.ByteDeltas)),
-				})
+	if lenInputs != 0 {
+		rows := [][]string{{
+			"name",
+			"records",
+			"bytes",
+		}}
+		for _, name := range inputNames {
+			style := lipgloss.NewStyle()
+			if selectedType == "input" && selectedMetric == name {
+				style = style.Bold(true).Inline(true).Foreground(lipgloss.Color("11"))
 			}
-			doc.WriteString(
-				renderTable("Input", rows) + "\n",
-			)
-		}
 
-		if lenOutputs != 0 {
-			rows := [][]string{{
-				"name",
-				"proc_records",
-				"proc_bytes",
-				"errors",
-				"retries",
-				"retries_failed",
-			}}
-			for _, name := range outputNames {
-				style := lipgloss.NewStyle()
-				if selectedType == "output" && selectedMetric == name {
-					style = style.Bold(true).Inline(true).Foreground(lipgloss.Color("11"))
-				}
-
-				delta := currentOutputDelta(m.history, name)
-				rows = append(rows, []string{
-					style.Render(name),
-					style.Render(fmt.Sprintf("%.2f", delta.ProcRecordDeltas)),
-					style.Render(fmt.Sprintf("%.2f", delta.ProcByteDeltas)),
-					style.Render(fmt.Sprintf("%.2f", delta.ErrorDeltas)),
-					style.Render(fmt.Sprintf("%.2f", delta.RetryDeltas)),
-					style.Render(fmt.Sprintf("%.2f", delta.RetryFailedDelta)),
-				})
+			series := m.series.Input[name]
+			i := len(series.Records) // all fields are equal length
+			if i != 0 {
+				i--
 			}
-			doc.WriteString(
-				renderTable("Output", rows) + "\n",
-			)
+			rows = append(rows, []string{
+				style.Render(name),
+				style.Render(fmt.Sprintf("%d", series.Records[i])),
+				style.Render(fmt.Sprintf("%d", series.Bytes[i])),
+			})
 		}
+		doc.WriteString(
+			renderTable("Inputs", rows) + "\n",
+		)
+	}
+
+	if lenOutputs != 0 {
+		rows := [][]string{{
+			"name",
+			"proc_records",
+			"proc_bytes",
+			"errors",
+			"retries",
+			"retries_failed",
+		}}
+		for _, name := range outputNames {
+			style := lipgloss.NewStyle()
+			if selectedType == "output" && selectedMetric == name {
+				style = style.Bold(true).Inline(true).Foreground(lipgloss.Color("11"))
+			}
+
+			series := m.series.Output[name]
+			i := len(series.ProcRecords) // all fields are equal length
+			if i != 0 {
+				i--
+			}
+			rows = append(rows, []string{
+				style.Render(name),
+				style.Render(fmt.Sprintf("%d", series.ProcRecords[i])),
+				style.Render(fmt.Sprintf("%d", series.ProcBytes[i])),
+				style.Render(fmt.Sprintf("%d", series.Errors[i])),
+				style.Render(fmt.Sprintf("%d", series.Retries[i])),
+				style.Render(fmt.Sprintf("%d", series.RetriesFailed[i])),
+			})
+		}
+		doc.WriteString(
+			renderTable("Outputs", rows) + "\n",
+		)
 	}
 
 	if m.err != nil {
@@ -299,160 +351,6 @@ func (m model) View() string {
 	) + "\n"
 }
 
-type normalizedInput struct {
-	RecordDeltas []float64
-	ByteDeltas   []float64
-}
-
-type normalizedOutput struct {
-	ProcRecordDeltas []float64
-	ProcByteDeltas   []float64
-	ErrorDeltas      []float64
-	RetryDeltas      []float64
-	RetryFailedDelta []float64
-}
-
-func normalizeInput(history []fluentbit.Metrics, name string) normalizedInput {
-	var out normalizedInput
-	if len(history) < 2 {
-		return out
-	}
-
-	for i, metrics := range history[1:] {
-		curr, ok := metrics.Input[name]
-		if !ok {
-			continue
-		}
-
-		prev, ok := history[i].Input[name]
-		if !ok {
-			continue
-		}
-
-		out.RecordDeltas = append(out.RecordDeltas, delta(float64(curr.Records), float64(prev.Records)))
-		out.ByteDeltas = append(out.ByteDeltas, delta(float64(curr.Bytes), float64(prev.Bytes)))
-	}
-	return out
-}
-
-func normalizeOutput(history []fluentbit.Metrics, name string) normalizedOutput {
-	var out normalizedOutput
-	if len(history) < 2 {
-		return out
-	}
-
-	for i, metrics := range history[1:] {
-		curr, ok := metrics.Output[name]
-		if !ok {
-			continue
-		}
-
-		prev, ok := history[i].Output[name]
-		if !ok {
-			continue
-		}
-
-		out.ProcRecordDeltas = append(out.ProcRecordDeltas, delta(float64(curr.ProcRecords), float64(prev.ProcRecords)))
-		out.ProcByteDeltas = append(out.ProcByteDeltas, delta(float64(curr.ProcBytes), float64(prev.ProcBytes)))
-		out.ErrorDeltas = append(out.ErrorDeltas, delta(float64(curr.Errors), float64(prev.Errors)))
-		out.RetryDeltas = append(out.RetryDeltas, delta(float64(curr.Retries), float64(prev.Retries)))
-		out.RetryFailedDelta = append(out.RetryFailedDelta, delta(float64(curr.RetriesFailed), float64(prev.RetriesFailed)))
-	}
-	return out
-}
-
-func currentInputNames(history []fluentbit.Metrics) []string {
-	l := len(history)
-	if l == 0 {
-		return nil
-	}
-
-	inputs := history[l-1].Input
-	out := make([]string, 0, len(inputs))
-	for name := range inputs {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func currentOutputNames(history []fluentbit.Metrics) []string {
-	l := len(history)
-	if l == 0 {
-		return nil
-	}
-
-	outputs := history[l-1].Output
-	out := make([]string, 0, len(outputs))
-	for name := range outputs {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out
-}
-
-type inputDelta struct {
-	RecordDeltas float64
-	ByteDeltas   float64
-}
-
-func currentInputDelta(history []fluentbit.Metrics, name string) inputDelta {
-	var out inputDelta
-	l := len(history)
-	if l < 2 {
-		return out
-	}
-
-	curr, ok := history[l-1].Input[name]
-	if !ok {
-		return out
-	}
-
-	prev, ok := history[l-2].Input[name]
-	if !ok {
-		return out
-	}
-
-	out.RecordDeltas = delta(float64(curr.Records), float64(prev.Records))
-	out.ByteDeltas = delta(float64(curr.Bytes), float64(prev.Bytes))
-
-	return out
-}
-
-type outputDelta struct {
-	ProcRecordDeltas float64
-	ProcByteDeltas   float64
-	ErrorDeltas      float64
-	RetryDeltas      float64
-	RetryFailedDelta float64
-}
-
-func currentOutputDelta(history []fluentbit.Metrics, name string) outputDelta {
-	var out outputDelta
-	l := len(history)
-	if l < 2 {
-		return out
-	}
-
-	curr, ok := history[l-1].Output[name]
-	if !ok {
-		return out
-	}
-
-	prev, ok := history[l-2].Output[name]
-	if !ok {
-		return out
-	}
-
-	out.ProcRecordDeltas = delta(float64(curr.ProcRecords), float64(prev.ProcRecords))
-	out.ProcByteDeltas = delta(float64(curr.ProcBytes), float64(prev.ProcBytes))
-	out.ErrorDeltas = delta(float64(curr.Errors), float64(prev.Errors))
-	out.RetryDeltas = delta(float64(curr.Retries), float64(prev.Retries))
-	out.RetryFailedDelta = delta(float64(curr.RetriesFailed), float64(prev.RetriesFailed))
-
-	return out
-}
-
 type renderPlotProps struct {
 	Caption string
 	Series  []float64
@@ -463,20 +361,24 @@ type renderPlotProps struct {
 const plotLabelGap = 5
 
 func renderPlot(props renderPlotProps) string {
+	var content string
+	if len(props.Series) == 0 {
+		content = "Loading..."
+	} else {
+		content = asciigraph.Plot(
+			props.Series,
+			asciigraph.Caption(props.Caption),
+			asciigraph.Width((props.Width)-(labelSize(props.Series)+plotLabelGap)),
+			asciigraph.Height(props.Height-2),
+			asciigraph.Offset(0),
+		)
+	}
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		PaddingRight(1).
 		Width(props.Width - 2).
 		Height(props.Height).
-		Render(
-			asciigraph.Plot(
-				props.Series,
-				asciigraph.Caption(props.Caption),
-				asciigraph.Width((props.Width)-(labelSize(props.Series)+plotLabelGap)),
-				asciigraph.Height(props.Height-2),
-				asciigraph.Offset(0),
-			),
-		)
+		Render(content)
 }
 
 func renderTable(title string, rows [][]string) string {
@@ -501,18 +403,6 @@ func renderTable(title string, rows [][]string) string {
 	return tw.Render()
 }
 
-func delta(a, b float64) float64 {
-	if a == b {
-		return 0
-	}
-
-	if a > b {
-		return a - b
-	}
-
-	return b - a
-}
-
 func labelSize(series []float64) int {
 	ff := make([]float64, len(series))
 	copy(ff, series)
@@ -524,4 +414,17 @@ func labelSize(series []float64) int {
 		return a
 	}
 	return b
+}
+
+func uint64ToFloat64Slice(vv []uint64) []float64 {
+	l := len(vv)
+	if l == 0 {
+		return nil
+	}
+
+	out := make([]float64, l)
+	for i, v := range vv {
+		out[i] = float64(v)
+	}
+	return out
 }

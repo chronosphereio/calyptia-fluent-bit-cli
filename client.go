@@ -37,16 +37,16 @@ type Metrics struct {
 }
 
 type MetricInput struct {
-	Records int64 `json:"records"`
-	Bytes   int64 `json:"bytes"`
+	Records uint64 `json:"records"`
+	Bytes   uint64 `json:"bytes"`
 }
 
 type MetricOutput struct {
-	ProcRecords   int64 `json:"proc_records"`
-	ProcBytes     int64 `json:"proc_bytes"`
-	Errors        int64 `json:"errors"`
-	Retries       int64 `json:"retries"`
-	RetriesFailed int64 `json:"retries_failed"`
+	ProcRecords   uint64 `json:"proc_records"`
+	ProcBytes     uint64 `json:"proc_bytes"`
+	Errors        uint64 `json:"errors"`
+	Retries       uint64 `json:"retries"`
+	RetriesFailed uint64 `json:"retries_failed"`
 }
 
 func (c *Client) BuildInfo(ctx context.Context) (BuildInfo, error) {
