@@ -22,20 +22,33 @@ import (
 )
 
 type model struct {
-	ctx               context.Context
-	baseURLSet        bool
-	baseURLInput      textinput.Model
-	baseURL           string
+	ctx context.Context
+
+	page string
+
+	baseURLSet   bool
+	baseURL      string
+	baseURLInput textinput.Model
+
 	pullIntervalSet   bool
-	pullIntervalInput textinput.Model
 	pullInterval      time.Duration
-	fluentbit         *fluentbit.Client
-	indexes           int
-	selectedIndex     int
-	series            *fluentbit.Series
-	infoLoaded        bool
-	info              fluentbit.BuildInfo
-	err               error
+	pullIntervalInput textinput.Model
+
+	fluentbit *fluentbit.Client
+
+	indexes       int
+	selectedIndex int
+
+	foundSelection bool
+	selectedType   string
+	selectedMetric string
+
+	series *fluentbit.Series
+
+	infoLoaded bool
+	info       fluentbit.BuildInfo
+
+	err error
 }
 
 func initialModel(ctx context.Context) model {
@@ -51,6 +64,7 @@ func initialModel(ctx context.Context) model {
 	pullIntervalInput.SetValue("5")
 	return model{
 		ctx:               ctx,
+		page:              "settings",
 		baseURLInput:      baseURLInput,
 		pullIntervalInput: pullIntervalInput,
 		series: &fluentbit.Series{
@@ -80,14 +94,37 @@ func fetchMetricsCmd(d time.Duration) tea.Cmd {
 	})
 }
 
+func updateSelectedMetric(m model) model {
+	inputNames := m.series.InputNames()
+	outputNames := m.series.OutputNames()
+	lenInputs := len(inputNames)
+	lenOutputs := len(outputNames)
+	if lenInputs != 0 && m.selectedIndex >= 0 && m.selectedIndex < lenInputs {
+		m.selectedType = "input"
+		m.selectedMetric = inputNames[m.selectedIndex]
+		m.foundSelection = true
+	} else if lenOutputs != 0 && m.selectedIndex >= 0 && m.selectedIndex < (lenInputs+lenOutputs) {
+		m.selectedType = "output"
+		m.selectedMetric = outputNames[m.selectedIndex-lenInputs]
+		m.foundSelection = true
+	} else {
+		m.foundSelection = false
+	}
+	return m
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyEsc:
+		case tea.KeyEsc:
+			if m.page == "graph" {
+				m.page = "table"
+			}
+		case tea.KeyCtrlC:
 			return m, tea.Quit
 		case tea.KeyEnter:
-			if m.fluentbit == nil {
+			if m.page == "settings" {
 				if !m.baseURLSet {
 					baseURL := m.baseURLInput.Value()
 					if u, err := url.Parse(baseURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
@@ -113,25 +150,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 					m.pullInterval = time.Second * time.Duration(pullIntervalInt)
 					m.pullIntervalSet = true
+					m.page = "table"
 
 					return m, tea.Batch(fetchBuildInfoCmd(), fetchMetricsCmd(m.pullInterval))
 				}
 			}
-		case tea.KeyShiftTab, tea.KeyLeft, tea.KeyUp:
-			m.selectedIndex--
-			if m.selectedIndex == -1 {
-				m.selectedIndex = 0
+			if m.page == "table" && m.foundSelection {
+				m.page = "graph"
 			}
-			return m, nil
-		case tea.KeyTab, tea.KeyRight, tea.KeyDown:
-			m.selectedIndex++
-			if m.selectedIndex == m.indexes {
-				m.selectedIndex = m.indexes - 1
+		case tea.KeyShiftTab, tea.KeyLeft, tea.KeyUp:
+			if m.page == "table" {
+				m.selectedIndex--
 				if m.selectedIndex == -1 {
 					m.selectedIndex = 0
 				}
+				m = updateSelectedMetric(m)
+				return m, nil
 			}
-			return m, nil
+		case tea.KeyTab, tea.KeyRight, tea.KeyDown:
+			if m.page == "table" {
+				m.selectedIndex++
+				if m.selectedIndex == m.indexes {
+					m.selectedIndex = m.indexes - 1
+					if m.selectedIndex == -1 {
+						m.selectedIndex = 0
+					}
+				}
+				m = updateSelectedMetric(m)
+				return m, nil
+			}
+		case tea.KeySpace:
+			if m.page == "table" && m.foundSelection {
+				m.page = "graph"
+			}
 		}
 	case fetchBuildInfoMsg:
 		info, err := m.fluentbit.BuildInfo(m.ctx)
@@ -157,6 +208,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.indexes = len(mm.Input) + len(mm.Output)
 				return mm, nil
 			})
+			m = updateSelectedMetric(m)
 			if err != nil {
 				m.err = err
 				return m, fetchMetricsCmd(m.pullInterval)
@@ -167,7 +219,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}()
 	}
 
-	if m.fluentbit == nil {
+	if m.page == "settings" {
 		var cmd1, cmd2 tea.Cmd
 		m.baseURLInput, cmd1 = m.baseURLInput.Update(msg)
 		m.pullIntervalInput, cmd2 = m.pullIntervalInput.Update(msg)
@@ -180,7 +232,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	var doc strings.Builder
 
-	if m.fluentbit == nil {
+	if m.page == "settings" {
 		if !m.baseURLSet {
 			doc.WriteString(
 				"Fluent Bit Base URL\n" + m.baseURLInput.View() + "\n",
@@ -193,157 +245,199 @@ func (m model) View() string {
 		}
 	}
 
-	var selectedType, selectedMetric string
-	inputNames := m.series.InputNames()
-	outputNames := m.series.OutputNames()
-	lenInputs := len(inputNames)
-	lenOutputs := len(outputNames)
-	if lenInputs != 0 && m.selectedIndex >= 0 && m.selectedIndex < lenInputs {
-		selectedType = "input"
-		selectedMetric = inputNames[m.selectedIndex]
-	} else if lenOutputs != 0 && m.selectedIndex >= 0 && m.selectedIndex < (lenInputs+lenOutputs) {
-		selectedType = "output"
-		selectedMetric = outputNames[m.selectedIndex-lenInputs]
-	}
-
-	screenWidth, _, err := term.GetSize(int(os.Stdout.Fd()))
+	screenWidth, screenHeight, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil {
 		screenWidth = 80
+		screenHeight = 32
 	}
 
-	if m.infoLoaded {
-		msg := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 2).Render(
-			fmt.Sprintf("Fluent Bit version=%s edition=%s", m.info.FluentBit.Version, m.info.FluentBit.Edition),
-		)
-		doc.WriteString(msg + "\n")
-	}
+	if m.page == "table" {
+		inputNames := m.series.InputNames()
+		outputNames := m.series.OutputNames()
+		lenInputs := len(inputNames)
+		lenOutputs := len(outputNames)
 
-	switch selectedType {
-	case "input":
-		rates := m.series.Input[selectedMetric].InstantRates()
-		doc.WriteString(
-			lipgloss.JoinHorizontal(lipgloss.Bottom,
-				renderPlot(renderPlotProps{
-					Caption: "input " + selectedMetric + " records rate",
-					Series:  uint64ToFloat64Slice(rates.Records),
-					Width:   screenWidth / 2,
-					Height:  12,
-				}),
-				renderPlot(renderPlotProps{
-					Caption: "input " + selectedMetric + " bytes rate",
-					Series:  uint64ToFloat64Slice(rates.Bytes),
-					Width:   screenWidth / 2,
-					Height:  12,
-				}),
-			) + "\n",
-		)
-	case "output":
-		rates := m.series.Output[selectedMetric].InstantRates()
-		doc.WriteString(
-			lipgloss.JoinVertical(lipgloss.Left,
-				lipgloss.JoinHorizontal(lipgloss.Bottom,
-					renderPlot(renderPlotProps{
-						Caption: "output " + selectedMetric + " proc_records rate",
-						Series:  uint64ToFloat64Slice(rates.ProcRecords),
-						Width:   screenWidth / 2,
-						Height:  12,
-					}),
-					renderPlot(renderPlotProps{
-						Caption: "output " + selectedMetric + " proc_bytes rate",
-						Series:  uint64ToFloat64Slice(rates.ProcBytes),
-						Width:   screenWidth / 2,
-						Height:  12,
-					}),
-				),
-				lipgloss.JoinHorizontal(lipgloss.Bottom,
-					renderPlot(renderPlotProps{
-						Caption: "output " + selectedMetric + " errors rate",
-						Series:  uint64ToFloat64Slice(rates.Errors),
-						Width:   screenWidth / 3,
-						Height:  7,
-					}),
-					renderPlot(renderPlotProps{
-						Caption: "output " + selectedMetric + " retries rate",
-						Series:  uint64ToFloat64Slice(rates.Retries),
-						Width:   screenWidth / 3,
-						Height:  7,
-					}),
-					renderPlot(renderPlotProps{
-						Caption: "output " + selectedMetric + " retries_failed rate",
-						Series:  uint64ToFloat64Slice(rates.RetriesFailed),
-						Width:   screenWidth / 3,
-						Height:  7,
-					}),
-				),
-			) + "\n",
-		)
-	}
+		var tables []string
+		if lenInputs != 0 {
+			rows := [][]string{{
+				"name",
+				"records",
+				"bytes",
+			}}
+			for _, name := range inputNames {
+				style := lipgloss.NewStyle()
+				if m.selectedType == "input" && m.selectedMetric == name {
+					style = style.Bold(true).Inline(true).Foreground(lipgloss.Color("11"))
+				}
 
-	if lenInputs != 0 {
-		rows := [][]string{{
-			"name",
-			"records",
-			"bytes",
-		}}
-		for _, name := range inputNames {
-			style := lipgloss.NewStyle()
-			if selectedType == "input" && selectedMetric == name {
-				style = style.Bold(true).Inline(true).Foreground(lipgloss.Color("11"))
+				series := m.series.Input[name]
+				i := len(series.Records) // all fields are equal length
+				if i != 0 {
+					i--
+				}
+				rows = append(rows, []string{
+					style.Render(name),
+					style.Render(fmt.Sprintf("%d", series.Records[i])),
+					style.Render(fmt.Sprintf("%d", series.Bytes[i])),
+				})
 			}
-
-			series := m.series.Input[name]
-			i := len(series.Records) // all fields are equal length
-			if i != 0 {
-				i--
-			}
-			rows = append(rows, []string{
-				style.Render(name),
-				style.Render(fmt.Sprintf("%d", series.Records[i])),
-				style.Render(fmt.Sprintf("%d", series.Bytes[i])),
-			})
+			tables = append(tables, renderTable("Inputs", rows))
 		}
-		doc.WriteString(
-			renderTable("Inputs", rows) + "\n",
-		)
+
+		if lenOutputs != 0 {
+			rows := [][]string{{
+				"name",
+				"proc_records",
+				"proc_bytes",
+				"errors",
+				"retries",
+				"retries_failed",
+			}}
+			for _, name := range outputNames {
+				style := lipgloss.NewStyle()
+				if m.selectedType == "output" && m.selectedMetric == name {
+					style = style.Bold(true).Inline(true).Foreground(lipgloss.Color("11"))
+				}
+
+				series := m.series.Output[name]
+				i := len(series.ProcRecords) // all fields are equal length
+				if i != 0 {
+					i--
+				}
+				rows = append(rows, []string{
+					style.Render(name),
+					style.Render(fmt.Sprintf("%d", series.ProcRecords[i])),
+					style.Render(fmt.Sprintf("%d", series.ProcBytes[i])),
+					style.Render(fmt.Sprintf("%d", series.Errors[i])),
+					style.Render(fmt.Sprintf("%d", series.Retries[i])),
+					style.Render(fmt.Sprintf("%d", series.RetriesFailed[i])),
+				})
+			}
+			tables = append(tables, renderTable("Outputs", rows))
+		}
+
+		if len(tables) != 0 {
+			doc.WriteString(
+				lipgloss.JoinVertical(lipgloss.Left,
+					lipgloss.JoinVertical(lipgloss.Left, tables...),
+					lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("(Move with arrow keys, and select with <Enter>)"),
+				) + "\n",
+			)
+		}
 	}
 
-	if lenOutputs != 0 {
-		rows := [][]string{{
-			"name",
-			"proc_records",
-			"proc_bytes",
-			"errors",
-			"retries",
-			"retries_failed",
-		}}
-		for _, name := range outputNames {
-			style := lipgloss.NewStyle()
-			if selectedType == "output" && selectedMetric == name {
-				style = style.Bold(true).Inline(true).Foreground(lipgloss.Color("11"))
-			}
-
-			series := m.series.Output[name]
-			i := len(series.ProcRecords) // all fields are equal length
-			if i != 0 {
-				i--
-			}
-			rows = append(rows, []string{
-				style.Render(name),
-				style.Render(fmt.Sprintf("%d", series.ProcRecords[i])),
-				style.Render(fmt.Sprintf("%d", series.ProcBytes[i])),
-				style.Render(fmt.Sprintf("%d", series.Errors[i])),
-				style.Render(fmt.Sprintf("%d", series.Retries[i])),
-				style.Render(fmt.Sprintf("%d", series.RetriesFailed[i])),
-			})
+	if m.page == "graph" {
+		switch m.selectedType {
+		case "input":
+			rates := m.series.Input[m.selectedMetric].InstantRates()
+			doc.WriteString(
+				lipgloss.JoinVertical(lipgloss.Left,
+					lipgloss.NewStyle().Background(lipgloss.Color("6")).Foreground(lipgloss.Color("0")).Padding(0, 1).Render("Input "+m.selectedMetric),
+					lipgloss.JoinHorizontal(lipgloss.Bottom,
+						renderPlot(renderPlotProps{
+							Caption: "records rate",
+							Series:  uint64ToFloat64Slice(rates.Records),
+							Width:   screenWidth / 2,
+							Height:  screenHeight - 8,
+						}),
+						renderPlot(renderPlotProps{
+							Caption: "bytes rate",
+							Series:  uint64ToFloat64Slice(rates.Bytes),
+							Width:   screenWidth / 2,
+							Height:  screenHeight - 8,
+						}),
+					),
+					lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("(Press <Esc> to go back)"),
+				) + "\n",
+			)
+		case "output":
+			rates := m.series.Output[m.selectedMetric].InstantRates()
+			doc.WriteString(
+				lipgloss.JoinVertical(lipgloss.Left,
+					lipgloss.NewStyle().Background(lipgloss.Color("6")).Foreground(lipgloss.Color("0")).Padding(0, 1).Render("Output "+m.selectedMetric),
+					lipgloss.JoinHorizontal(lipgloss.Bottom,
+						renderPlot(renderPlotProps{
+							Caption: "proc_records rate",
+							Series:  uint64ToFloat64Slice(rates.ProcRecords),
+							Width:   screenWidth / 2,
+							Height:  (screenHeight / 2) - 3,
+						}),
+						renderPlot(renderPlotProps{
+							Caption: "proc_bytes rate",
+							Series:  uint64ToFloat64Slice(rates.ProcBytes),
+							Width:   screenWidth / 2,
+							Height:  (screenHeight / 2) - 3,
+						}),
+					),
+					lipgloss.JoinHorizontal(lipgloss.Bottom,
+						renderPlot(renderPlotProps{
+							Caption: "errors rate",
+							Series:  uint64ToFloat64Slice(rates.Errors),
+							Width:   screenWidth / 3,
+							Height:  (screenHeight / 2) - 7,
+						}),
+						renderPlot(renderPlotProps{
+							Caption: "retries rate",
+							Series:  uint64ToFloat64Slice(rates.Retries),
+							Width:   screenWidth / 3,
+							Height:  (screenHeight / 2) - 7,
+						}),
+						renderPlot(renderPlotProps{
+							Caption: "retries_failed rate",
+							Series:  uint64ToFloat64Slice(rates.RetriesFailed),
+							Width:   screenWidth / 3,
+							Height:  (screenHeight / 2) - 7,
+						}),
+					),
+					lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("(Press <Esc> to go back)"),
+				) + "\n",
+			)
 		}
-		doc.WriteString(
-			renderTable("Outputs", rows) + "\n",
-		)
 	}
 
 	if m.err != nil {
 		msg := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err.Error())
 		doc.WriteString(msg + "\n\n")
+	}
+
+	var statusLines []string
+	if m.infoLoaded {
+		statusLines = append(statusLines, fmt.Sprintf("fluent-bit version: %s (%s)", m.info.FluentBit.Version, m.info.FluentBit.Edition))
+	}
+
+	if m.pullIntervalSet {
+		statusLines = append(statusLines, fmt.Sprintf("pull interval: %ds", int64(m.pullInterval.Seconds())))
+	}
+
+	if m.err != nil {
+		statusLines = append(statusLines, " "+lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(fmt.Sprintf("error: %s", m.err.Error())))
+	}
+
+	if len(statusLines) != 0 {
+		for i, s := range statusLines {
+			if i != len(statusLines)-1 {
+				statusLines[i] = s + " "
+			}
+		}
+
+		docHeight := lipgloss.Height(doc.String())
+
+		diff := (screenHeight - docHeight) - 2
+		if diff > 0 {
+			doc.WriteString(strings.Repeat("\n", diff))
+		}
+
+		doc.WriteString(
+			lipgloss.NewStyle().
+				Width(screenWidth).
+				Background(lipgloss.Color("6")).
+				Foreground(lipgloss.Color("0")).
+				Padding(0, 1).
+				Inline(true).
+				Render(
+					lipgloss.JoinHorizontal(lipgloss.Left, statusLines...),
+				),
+		)
 	}
 
 	return lipgloss.NewStyle().MaxWidth(screenWidth).Render(
@@ -363,7 +457,7 @@ const plotLabelGap = 5
 func renderPlot(props renderPlotProps) string {
 	var content string
 	if len(props.Series) == 0 {
-		content = "Loading..."
+		content = " Loading..."
 	} else {
 		content = asciigraph.Plot(
 			props.Series,
