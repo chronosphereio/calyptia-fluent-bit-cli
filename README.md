@@ -9,7 +9,7 @@
 
 Fluent Bit Client UI Tool.
 
-![Recoding](https://raw.githubusercontent.com/calyptia/fluent-bit-cli/main/assets/rec.svg)
+[![asciicast](https://asciinema.org/a/419611.svg)](https://asciinema.org/a/419611)
 
 ## Build instructions
 
