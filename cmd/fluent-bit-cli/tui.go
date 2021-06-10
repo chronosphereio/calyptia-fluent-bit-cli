@@ -21,16 +21,19 @@ import (
 	"golang.org/x/term"
 )
 
+var (
+	errInvalidBaseURL      = errors.New("invalid base URL")
+	errInvalidPullInterval = errors.New("invalid pull interval")
+)
+
 type model struct {
 	ctx context.Context
 
 	page string
 
-	baseURLSet   bool
-	baseURL      string
+	baseURL      *url.URL
 	baseURLInput textinput.Model
 
-	pullIntervalSet   bool
 	pullInterval      time.Duration
 	pullIntervalInput textinput.Model
 
@@ -125,31 +128,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case tea.KeyEnter:
 			if m.page == "settings" {
-				if !m.baseURLSet {
-					baseURL := m.baseURLInput.Value()
-					if u, err := url.Parse(baseURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-						m.err = errors.New("invalid URL")
+				if m.baseURL == nil {
+					u, err := url.Parse(m.baseURLInput.Value())
+					if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+						m.err = errInvalidBaseURL
 						return m, textinput.Blink
 					}
 
-					m.baseURL = baseURL
-					m.baseURLSet = true
+					u.RawQuery = ""
+					u.Fragment = ""
+					u.Path = ""
+					if m.err == errInvalidBaseURL {
+						m.err = nil
+					}
+					m.baseURL = u
 					m.pullIntervalInput.Focus()
 				} else {
-					pullIntervalStr := m.pullIntervalInput.Value()
-					pullIntervalInt, err := strconv.ParseInt(pullIntervalStr, 10, 64)
+					pullIntervalInt, err := strconv.ParseInt(m.pullIntervalInput.Value(), 10, 64)
 					if err != nil || pullIntervalInt < 1 {
-						m.err = errors.New("invalid pull interval")
+						m.err = errInvalidPullInterval
 						return m, textinput.Blink
 					}
 
 					m.fluentbit = &fluentbit.Client{
 						HTTPClient: http.DefaultClient,
-						BaseURL:    strings.TrimSuffix(m.baseURL, "/"),
+						BaseURL:    m.baseURL.String(),
 					}
 
+					if m.err == errInvalidPullInterval {
+						m.err = nil
+					}
 					m.pullInterval = time.Second * time.Duration(pullIntervalInt)
-					m.pullIntervalSet = true
 					m.page = "table"
 
 					return m, tea.Batch(fetchBuildInfoCmd(), fetchMetricsCmd(m.pullInterval))
@@ -233,7 +242,7 @@ func (m model) View() string {
 	var doc strings.Builder
 
 	if m.page == "settings" {
-		if !m.baseURLSet {
+		if m.baseURL == nil {
 			doc.WriteString(
 				"Fluent Bit Base URL\n" + m.baseURLInput.View() + "\n",
 			)
@@ -405,7 +414,11 @@ func (m model) View() string {
 		statusLines = append(statusLines, fmt.Sprintf("fluent-bit version: %s (%s)", m.info.FluentBit.Version, m.info.FluentBit.Edition))
 	}
 
-	if m.pullIntervalSet {
+	if m.baseURL != nil {
+		statusLines = append(statusLines, fmt.Sprintf("host: %s", m.baseURL.Host))
+	}
+
+	if m.pullInterval != 0 {
 		statusLines = append(statusLines, fmt.Sprintf("pull interval: %ds", int64(m.pullInterval.Seconds())))
 	}
 
