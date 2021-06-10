@@ -9,7 +9,7 @@
 
 Fluent Bit Client UI Tool.
 
-![Screenshot](https://raw.githubusercontent.com/calyptia/fluent-bit-cli/main/assets/screenshot_0_20210531.png)
+![Recoding](https://raw.githubusercontent.com/calyptia/fluent-bit-cli/main/assets/rec.png)
 
 ## Build instructions
 
