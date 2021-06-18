@@ -260,6 +260,43 @@ func (m model) View() string {
 		screenHeight = 32
 	}
 
+	var statusLines []string
+	if m.infoLoaded {
+		statusLines = append(statusLines, fmt.Sprintf("fluent-bit version: %s (%s)", m.info.FluentBit.Version, m.info.FluentBit.Edition))
+	}
+
+	if m.baseURL != nil {
+		statusLines = append(statusLines, fmt.Sprintf("host: %s", m.baseURL.Host))
+	}
+
+	if m.pullInterval != 0 {
+		statusLines = append(statusLines, fmt.Sprintf("pull interval: %ds", int64(m.pullInterval.Seconds())))
+	}
+
+	if m.err != nil {
+		statusLines = append(statusLines, " "+lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(fmt.Sprintf("error: %s", m.err.Error())))
+	}
+
+	var statusBar string
+	var statusBarHeight int
+	if len(statusLines) != 0 {
+		for i, s := range statusLines {
+			if i != len(statusLines)-1 {
+				statusLines[i] = s + " "
+			}
+		}
+
+		statusBar = lipgloss.NewStyle().
+			Width(screenWidth).
+			Background(lipgloss.Color("6")).
+			Foreground(lipgloss.Color("0")).
+			Padding(0, 1).
+			Render(
+				lipgloss.JoinHorizontal(lipgloss.Left, statusLines...),
+			)
+		statusBarHeight = lipgloss.Height(statusBar)
+	}
+
 	if m.page == "table" {
 		inputNames := m.series.InputNames()
 		outputNames := m.series.OutputNames()
@@ -347,13 +384,13 @@ func (m model) View() string {
 							Caption: "records rate",
 							Series:  uint64ToFloat64Slice(rates.Records),
 							Width:   screenWidth / 2,
-							Height:  screenHeight - 8,
+							Height:  screenHeight - (7 + statusBarHeight),
 						}),
 						renderPlot(renderPlotProps{
 							Caption: "bytes rate",
 							Series:  uint64ToFloat64Slice(rates.Bytes),
 							Width:   screenWidth / 2,
-							Height:  screenHeight - 8,
+							Height:  screenHeight - (7 + statusBarHeight),
 						}),
 					),
 					lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("(Press <Esc> to go back)"),
@@ -369,13 +406,13 @@ func (m model) View() string {
 							Caption: "proc_records rate",
 							Series:  uint64ToFloat64Slice(rates.ProcRecords),
 							Width:   screenWidth / 2,
-							Height:  (screenHeight / 2) - 3,
+							Height:  (screenHeight / 2) - (2 + statusBarHeight),
 						}),
 						renderPlot(renderPlotProps{
 							Caption: "proc_bytes rate",
 							Series:  uint64ToFloat64Slice(rates.ProcBytes),
 							Width:   screenWidth / 2,
-							Height:  (screenHeight / 2) - 3,
+							Height:  (screenHeight / 2) - (2 + statusBarHeight),
 						}),
 					),
 					lipgloss.JoinHorizontal(lipgloss.Bottom,
@@ -409,30 +446,7 @@ func (m model) View() string {
 		doc.WriteString(msg + "\n\n")
 	}
 
-	var statusLines []string
-	if m.infoLoaded {
-		statusLines = append(statusLines, fmt.Sprintf("fluent-bit version: %s (%s)", m.info.FluentBit.Version, m.info.FluentBit.Edition))
-	}
-
-	if m.baseURL != nil {
-		statusLines = append(statusLines, fmt.Sprintf("host: %s", m.baseURL.Host))
-	}
-
-	if m.pullInterval != 0 {
-		statusLines = append(statusLines, fmt.Sprintf("pull interval: %ds", int64(m.pullInterval.Seconds())))
-	}
-
-	if m.err != nil {
-		statusLines = append(statusLines, " "+lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(fmt.Sprintf("error: %s", m.err.Error())))
-	}
-
-	if len(statusLines) != 0 {
-		for i, s := range statusLines {
-			if i != len(statusLines)-1 {
-				statusLines[i] = s + " "
-			}
-		}
-
+	if statusBar != "" {
 		docHeight := lipgloss.Height(doc.String())
 
 		diff := (screenHeight - docHeight) - 2
@@ -440,17 +454,7 @@ func (m model) View() string {
 			doc.WriteString(strings.Repeat("\n", diff))
 		}
 
-		doc.WriteString(
-			lipgloss.NewStyle().
-				Width(screenWidth).
-				Background(lipgloss.Color("6")).
-				Foreground(lipgloss.Color("0")).
-				Padding(0, 1).
-				Inline(true).
-				Render(
-					lipgloss.JoinHorizontal(lipgloss.Left, statusLines...),
-				),
-		)
+		doc.WriteString(statusBar)
 	}
 
 	return lipgloss.NewStyle().MaxWidth(screenWidth).Render(
