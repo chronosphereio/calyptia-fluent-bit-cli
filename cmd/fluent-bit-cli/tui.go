@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	fluentbit "github.com/calyptia/fluent-bit-cli"
+	fluentbit "github.com/calyptia/go-fluent-bit-metrics"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
